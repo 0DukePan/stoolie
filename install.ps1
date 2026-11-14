@@ -30,13 +30,20 @@ try {
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
 
     Write-Host "  verifying SHA-256"
-    $published = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url -UseBasicParsing).Content
+    # `Content` is a string on some PowerShell builds and a byte array on others.
+    $response = Invoke-WebRequest -Uri $checksumAsset.browser_download_url -UseBasicParsing
+    $published = if ($response.Content -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($response.Content)
+    } else {
+        [string]$response.Content
+    }
     $expected = ($published -split '\s+')[0].Trim().ToLower()
+    if ($expected -notmatch '^[0-9a-f]{64}$') { throw "published checksum is malformed: $expected" }
     $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
     if ($expected -ne $actual) {
         throw "checksum mismatch: expected $expected, got $actual"
     }
-    Write-Host "  checksum ok ($($actual.Substring(0,12))…)" -ForegroundColor Green
+    Write-Host "  checksum ok ($($actual.Substring(0,12))...)" -ForegroundColor Green
 
     Expand-Archive -Path $zip -DestinationPath $temp -Force
     $exe = Get-ChildItem -Path $temp -Filter 'stoolie.exe' -Recurse | Select-Object -First 1
