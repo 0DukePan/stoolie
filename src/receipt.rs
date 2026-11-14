@@ -338,21 +338,21 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             version: "0.1.0".into(),
-            generated: 1_763_000_000,
+            generated: 1_763_000_000_000,
             days: 13,
             os: "Windows 10 Pro 22H2 (build 19045)".into(),
             sessions: vec![Session {
                 capability: "microphone".into(),
                 app: "<script>alert(1)</script>.exe".into(),
                 app_path: None,
-                start: 1_763_000_000,
-                stop: Some(1_763_000_014),
+                start: 1_763_000_000_000,
+                stop: Some(1_763_000_014_100),
                 source: Source::Registry,
                 context: vec!["Brave".into(), "Discord".into()],
             }],
             states: Vec::new(),
             events: vec![ConsentEvent {
-                ts: 1_763_000_000,
+                ts: 1_763_000_000_000,
                 event_id: 1004,
                 capability: "microphone".into(),
                 app: Some("Microsoft.Windows.Photos_8wekyb3d8bbwe".into()),
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn receipt_contains_the_headline_and_sources() {
         let html = render(&snapshot());
-        assert!(html.contains("14.0"));
+        assert!(html.contains("14.1"));
         assert!(html.contains("ConsentStore"));
         assert!(html.contains("0 bytes sent"));
         assert!(html.contains("Microsoft.Windows.Photos"));

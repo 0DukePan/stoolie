@@ -415,7 +415,7 @@ mod tests {
     fn empty_snapshot_renders_honest_copy() {
         let snapshot = Snapshot {
             version: "0.1.0".into(),
-            generated: 1_763_000_000,
+            generated: 1_763_000_000_000,
             days: 13,
             os: "Windows 10 Pro".into(),
             sessions: Vec::new(),
