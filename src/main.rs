@@ -196,7 +196,7 @@ fn doctor() -> Result<()> {
             .iter()
             .filter(|session| session.capability == capability)
             .count();
-        println!("  {capability:<15} setting {state:<7} · {count} app(s) with a timestamp");
+        println!("  {capability:<15} setting {state:<7} - {count} session(s) with a timestamp");
     }
     let events = eventlog::read_events(400);
     if events.is_empty() {
@@ -223,7 +223,7 @@ fn doctor() -> Result<()> {
         ),
         Err(error) => println!("archive           unavailable: {error}"),
     }
-    println!("network code      none — the binary contains no sockets");
+    println!("network code      none - the binary contains no sockets");
     Ok(())
 }
 
