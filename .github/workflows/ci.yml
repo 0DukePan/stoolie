@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the GNU host so local builds work without
+      # Visual Studio Build Tools. CI has no MinGW, so it opts out here and
+      # releases are built with MSVC.
+      - name: Use the MSVC toolchain for this job
+        shell: bash
+        run: echo "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Report binary size
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release/stoolie.exe
+          "{0:N2} MB" -f ($exe.Length / 1MB)
+
+      - name: Smoke test the binary
+        shell: pwsh
+        run: |
+          ./target/release/stoolie.exe --version
+          ./target/release/stoolie.exe doctor
+          ./target/release/stoolie.exe --network
+          ./target/release/stoolie.exe receipt --out receipt.html
+          if (-not (Test-Path receipt.html)) { throw "receipt was not written" }
+          $html = Get-Content receipt.html -Raw
+          if ($html -notmatch 'SENSOR RECEIPT') { throw "receipt looks empty" }

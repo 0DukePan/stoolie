@@ -1,0 +1,46 @@
+name: Wrong or over-claimed row
+description: The receipt says something the data does not support
+labels: ["correctness"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most important kind of bug this project can have. A row that claims more than the
+        source proves is worse than a missing row. Thank you for reporting it — and please redact
+        anything personal.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is wrong
+      options:
+        - It attributed a session to the wrong application
+        - It says a capability was used when it was not
+        - It reports a duration that does not match the registry
+        - It treats context (timeline overlap) as attribution
+        - It claims something was recorded
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: The row
+      description: Copy the line from `stoolie json` (preferred) or the receipt.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the source actually says
+      description: |
+        For registry rows, the output of:
+        `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore" /s`
+        with anything personal removed.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: stoolie version
+    validations:
+      required: true

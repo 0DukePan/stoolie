@@ -1,0 +1,43 @@
+name: Bug report
+description: Something is wrong with the output, the receipt, or the build
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove your user name, machine name and SID from anything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you run, and what did you see?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: stoolie version
+      description: Output of `stoolie --version`
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: The first line of `stoolie doctor`
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`stoolie doctor` output"
+      description: This says which data sources are readable on your machine.
+      render: text
+    validations:
+      required: true

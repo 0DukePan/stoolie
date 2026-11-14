@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish a Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the MSVC toolchain for this job
+        shell: bash
+        run: echo "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test before publishing
+        run: cargo test --all
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "stoolie-$tag-windows-x86_64"
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          Copy-Item target/release/stoolie.exe "dist/$name/"
+          Copy-Item LICENSE, README.md, docs "dist/$name/" -Recurse
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Set-Content "dist/$name.zip.sha256" -Encoding ascii
+          $hash
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "stoolie-$tag-windows-x86_64"
+          gh release create $tag `
+            "dist/$name.zip" "dist/$name.zip.sha256" `
+            --title "stoolie $tag" `
+            --notes "Windows x64 build. Verify the download against the published SHA-256 before running it. Unsigned: SmartScreen will warn, and that warning is honest." `
+            --verify-tag
