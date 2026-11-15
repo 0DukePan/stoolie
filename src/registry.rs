@@ -162,9 +162,70 @@ pub fn decode_app_path(key_name: &str) -> String {
     key_name.replace('#', r"\")
 }
 
+/// Decode one `NonPackaged` child key into a session. Pure: given values, not a
+/// hive, so the interpretation rules can be tested without a live registry.
+pub fn session_from_non_packaged(
+    capability: &str,
+    key_name: &str,
+    start_filetime: u64,
+    stop_filetime: u64,
+) -> Option<Session> {
+    let start = filetime_to_unix_ms(start_filetime)?;
+    let stop = filetime_to_unix_ms(stop_filetime);
+    if let Some(stop) = stop {
+        if stop < start {
+            // A stop before the start is a broken record, not a negative
+            // session. Drop it rather than print a nonsensical duration.
+            return None;
+        }
+    }
+    let path = decode_app_path(key_name);
+    Some(Session {
+        capability: capability.to_string(),
+        app: app_short_name(&path),
+        app_path: Some(path),
+        start,
+        stop,
+        source: Source::Registry,
+        context: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_session_has_no_stop() {
+        let start = crate::util::unix_ms_to_filetime(1_763_000_000_000);
+        let session =
+            session_from_non_packaged("microphone", r"C:#Apps#Zoom.exe", start, 0).unwrap();
+        assert!(session.live());
+        assert_eq!(session.duration(), None);
+        assert_eq!(session.app, "Zoom.exe");
+        assert_eq!(session.app_path.as_deref(), Some(r"C:\Apps\Zoom.exe"));
+    }
+
+    #[test]
+    fn a_finished_session_has_a_duration() {
+        let start = crate::util::unix_ms_to_filetime(1_763_000_000_000);
+        let stop = crate::util::unix_ms_to_filetime(1_763_000_014_100);
+        let session =
+            session_from_non_packaged("microphone", r"C:#Apps#Discord.exe", start, stop).unwrap();
+        assert_eq!(session.duration(), Some(14_100));
+    }
+
+    #[test]
+    fn a_stop_before_the_start_is_dropped() {
+        let start = crate::util::unix_ms_to_filetime(1_763_000_014_000);
+        let stop = crate::util::unix_ms_to_filetime(1_763_000_000_000);
+        assert!(session_from_non_packaged("webcam", r"C:#x.exe", start, stop).is_none());
+    }
+
+    #[test]
+    fn a_zero_start_is_not_a_session() {
+        assert!(session_from_non_packaged("webcam", r"C:#x.exe", 0, 0).is_none());
+    }
 
     #[test]
     fn non_packaged_keys_decode_to_windows_paths() {

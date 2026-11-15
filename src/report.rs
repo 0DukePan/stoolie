@@ -30,6 +30,8 @@ pub struct Snapshot {
     pub archive_path: String,
     pub capabilities_seen: usize,
     pub event_log_available: bool,
+    /// Things the run could not read. Printed, never swallowed.
+    pub warnings: Vec<String>,
 }
 
 impl Snapshot {
@@ -37,13 +39,21 @@ impl Snapshot {
         let now = util::now_ms();
         let since = now - (days as i64) * 86_400_000;
 
+        let live = registry::read_sessions();
+        let events_all = eventlog::read_events(400);
+
         let mut store = store::Store::open_default().ok();
-        if let Some(store) = store.as_mut() {
-            let _ = store.sync(&registry::read_sessions(), &eventlog::read_events(400));
-        }
+        let archive_error = match store.as_mut() {
+            Some(store) => store.sync(&live, &events_all).err().map(|error| {
+                // A failed import must not fail the run: the live registry is
+                // still the truth for this moment. Say so, then carry on.
+                format!("archive import failed: {error}")
+            }),
+            None => Some("archive unavailable: could not open the database".to_string()),
+        };
 
         let timeline = crate::timeline::load();
-        let mut sessions: Vec<Session> = registry::read_sessions();
+        let mut sessions: Vec<Session> = live;
         if let Some(store) = store.as_ref() {
             if let Ok(archived) = store.sessions_since(since) {
                 for session in archived {
@@ -64,9 +74,10 @@ impl Snapshot {
         }
         sessions.sort_by_key(|session| std::cmp::Reverse(session.start));
 
-        let events: Vec<ConsentEvent> = eventlog::read_events(400)
-            .into_iter()
+        let events: Vec<ConsentEvent> = events_all
+            .iter()
             .filter(|event| is_sensor(&event.capability))
+            .cloned()
             .collect();
 
         let states = registry::read_states();
@@ -74,6 +85,17 @@ impl Snapshot {
             .as_ref()
             .map(|s| s.session_count().unwrap_or(0))
             .unwrap_or(0);
+        let event_log_available = !events_all.is_empty();
+        let mut warnings: Vec<String> = Vec::new();
+        if let Some(message) = archive_error {
+            warnings.push(message);
+        }
+        if !event_log_available {
+            warnings.push("privacy-auditing log returned no events".to_string());
+        }
+        if !timeline.available() {
+            warnings.push("activity timeline unavailable on this machine".to_string());
+        }
         let archive_events = store
             .as_ref()
             .map(|s| s.event_count().unwrap_or(0))
@@ -102,7 +124,8 @@ impl Snapshot {
                 .map(|s| s.path().display().to_string())
                 .unwrap_or_default(),
             capabilities_seen: registry::capability_count(),
-            event_log_available: eventlog::available(),
+            event_log_available,
+            warnings,
         })
     }
 
@@ -248,6 +271,9 @@ impl Snapshot {
             thousands(self.archive_events.max(0) as usize),
             paint.dim(&self.archive_path)
         ));
+        for warning in &self.warnings {
+            out.push_str(&format!("  {} {}\n", paint.red("!"), paint.dim(warning)));
+        }
         out.push_str(&format!(
             "\n  → {}   {}\n\n",
             paint.bold("stoolie receipt"),
@@ -434,6 +460,7 @@ mod tests {
             archive_path: String::new(),
             capabilities_seen: 0,
             event_log_available: false,
+            warnings: Vec::new(),
         };
         let text = snapshot.summary(false);
         assert!(text.contains("nothing recorded"));

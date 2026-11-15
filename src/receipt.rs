@@ -373,6 +373,7 @@ mod tests {
             archive_path: "C:/x/stoolie.db".into(),
             capabilities_seen: 29,
             event_log_available: true,
+            warnings: Vec::new(),
         }
     }
 
