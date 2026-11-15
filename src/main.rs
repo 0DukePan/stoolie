@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use stoolie::report::{os_string, Snapshot};
-use stoolie::{eventlog, receipt, registry, store, timeline, util, VERSION};
+use stoolie::platform::{os_string, Host};
+use stoolie::report::Snapshot;
+use stoolie::{eventlog, receipt, store, util, VERSION};
 
 #[derive(Parser)]
 #[command(
@@ -117,7 +118,9 @@ fn watch(interval: u64) -> Result<()> {
     println!(
         "watching capability use every {interval}s · Ctrl+C to stop · nothing leaves this machine"
     );
-    let mut previous: HashMap<(String, String), (i64, Option<i64>)> = registry::read_sessions()
+    let host = Host::detect();
+    let mut previous: HashMap<(String, String), (i64, Option<i64>)> = host
+        .sessions()
         .into_iter()
         .map(|session| {
             (
@@ -129,7 +132,8 @@ fn watch(interval: u64) -> Result<()> {
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(interval));
-        let sessions = registry::read_sessions();
+        let host = Host::detect();
+        let sessions = host.sessions();
         let mut current: HashMap<(String, String), (i64, Option<i64>)> = HashMap::new();
         for session in &sessions {
             let key = (session.capability.clone(), session.app.clone());
@@ -179,13 +183,14 @@ fn watch(interval: u64) -> Result<()> {
 
 fn doctor() -> Result<()> {
     println!("stoolie {VERSION} · {}", os_string());
-    let sessions = registry::read_sessions();
+    let host = Host::detect();
+    let sessions = host.sessions();
     println!(
         "consent store     {} capabilities · {} sessions with timestamps",
-        registry::capability_count(),
+        host.capability_count(),
         sessions.len()
     );
-    let states = registry::read_states();
+    let states = host.states();
     for capability in stoolie::SENSOR_CAPABILITIES {
         let state = states
             .iter()
@@ -198,13 +203,13 @@ fn doctor() -> Result<()> {
             .count();
         println!("  {capability:<15} setting {state:<7} - {count} session(s) with a timestamp");
     }
-    let events = eventlog::read_events(400);
+    let events = host.read_events(&eventlog::ReadOptions::default()).events;
     if events.is_empty() {
         println!("privacy audit     unavailable (channel not readable, or nothing recorded)");
     } else {
         println!("privacy audit     {} events readable", events.len());
     }
-    let timeline = timeline::load();
+    let timeline = host.timeline();
     if timeline.available() {
         println!(
             "timeline          {} activities · {} apps",
@@ -214,48 +219,36 @@ fn doctor() -> Result<()> {
     } else {
         println!("timeline          unavailable on this machine");
     }
-    match store::Store::open_default() {
+    match store::open_default() {
         Ok(store) => println!(
             "archive           {} sessions · {} events · {}",
             store.session_count().unwrap_or(0),
             store.event_count().unwrap_or(0),
-            store.path().display()
+            store.location()
         ),
         Err(error) => println!("archive           unavailable: {error}"),
+    }
+    for reason in host.reasons() {
+        println!("host              {reason}");
     }
     println!("network code      none - the binary contains no sockets");
     Ok(())
 }
 
 /// Count sockets owned by this process. There is no network code in stoolie, so
-/// the honest answer is always zero — the point is that it is measured, not
+/// the honest answer is always zero - the point is that it is measured, not
 /// asserted.
 fn network_audit() -> Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let output = std::process::Command::new("netstat")
-            .arg("-ano")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .context("running netstat")?;
-        let pid = std::process::id().to_string();
-        let text = String::from_utf8_lossy(&output.stdout);
-        let count = text
-            .lines()
-            .filter(|line| line.trim_end().ends_with(&pid))
-            .filter(|line| line.contains("ESTABLISHED") || line.contains("SYN_SENT"))
-            .count();
-        println!("stoolie owns {count} outbound connections.");
-        if count == 0 {
-            println!("Nothing to believe: measured with netstat, not promised in a README.");
+    match Host::detect().outbound_connection_count() {
+        Some(count) => {
+            println!("stoolie owns {count} outbound connections.");
+            if count == 0 {
+                println!("Nothing to believe: measured with netstat, not promised in a README.");
+            }
         }
-        Ok(())
+        None => println!(
+            "stoolie owns 0 outbound connections (this host has no netstat to confirm it)."
+        ),
     }
-    #[cfg(not(windows))]
-    {
-        println!("stoolie owns 0 outbound connections (netstat audit is Windows-only).");
-        Ok(())
-    }
+    Ok(())
 }

@@ -40,6 +40,12 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      # sqlite is a feature so the portable core can be type-checked with no C
+      # toolchain. Build both ways: the default build is what ships, and the
+      # bare build is what proves `platform.rs` is the only OS-specific seam.
+      - name: Test without the sqlite feature
+        run: cargo test --all --no-default-features
+
       - name: Build release binary
         run: cargo build --release
 

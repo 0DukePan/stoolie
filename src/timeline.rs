@@ -9,7 +9,6 @@
 //! read-only open of a live SQLite file can fail on a locked page.
 
 use crate::model::Activity;
-use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
@@ -118,16 +117,31 @@ fn copy_to_temp(source: &Path) -> Option<PathBuf> {
     Some(target)
 }
 
-fn read_activities(path: &Path) -> rusqlite::Result<Vec<Activity>> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut statement =
-        connection.prepare("SELECT StartTime, EndTime, AppId FROM Activity WHERE StartTime > 0")?;
-    let rows = statement.query_map([], |row| {
-        let start: i64 = row.get(0)?;
-        let end: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(start);
-        let app_id: Option<String> = row.get(2)?;
-        Ok((start, end, app_id))
-    })?;
+/// Without the `sqlite` feature the timeline cannot be read at all; the rest of
+/// the crate still type-checks and the caller sees "unavailable", which is the
+/// same thing it shows on a machine with no timeline database.
+#[cfg(not(feature = "sqlite"))]
+fn read_activities(_path: &Path) -> Result<Vec<Activity>, String> {
+    Err("built without the sqlite feature".to_string())
+}
+
+#[cfg(feature = "sqlite")]
+fn read_activities(path: &Path) -> Result<Vec<Activity>, String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT StartTime, EndTime, AppId FROM Activity WHERE StartTime > 0")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            let start: i64 = row.get(0)?;
+            let end: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(start);
+            let app_id: Option<String> = row.get(2)?;
+            Ok((start, end, app_id))
+        })
+        .map_err(|error| error.to_string())?;
     let mut activities = Vec::new();
     for row in rows.flatten() {
         let (start, end, app_id) = row;

@@ -8,33 +8,116 @@
 //! The log is read through `wevtutil`, which ships with Windows and needs no
 //! elevation for this channel. Parsing is deliberately forgiving: an unexpected
 //! shape drops the record, never the whole run.
+//!
+//! Imports are incremental. `ReadOptions::since` is pushed into the XPath query
+//! so a machine with a large log does not pay to read events the archive already
+//! holds: the first run reads the history, later runs read the delta.
 
 use crate::model::ConsentEvent;
 use chrono::DateTime;
 
 pub const CHANNEL: &str = "Microsoft-Windows-Privacy-Auditing/Operational";
 
-/// Read up to `limit` events, newest last. Returns an empty vector when the
-/// channel is unavailable; callers report that rather than failing.
-pub fn read_events(limit: usize) -> Vec<ConsentEvent> {
-    match read_raw(limit) {
-        Ok(xml) => {
-            let mut events = parse(&xml);
-            events.sort_by_key(|event| event.ts);
-            events
+/// What to read, and how much to trust the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Unix ms. Events at or after this instant are requested.
+    pub since_ms: Option<i64>,
+    /// Hard ceiling on events requested, newest first.
+    pub limit: usize,
+    /// When the cursor is older than the oldest retained record, some events
+    /// may be missing; the caller prints that instead of pretending otherwise.
+    pub cursor_trusted: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        ReadOptions {
+            since_ms: None,
+            limit: DEFAULT_LIMIT,
+            cursor_trusted: true,
         }
-        Err(_) => Vec::new(),
     }
 }
 
+/// Events requested when there is no cursor yet. The channel held 206 records on
+/// the development machine after five months, so this covers a full history
+/// without asking for more than we render.
+pub const DEFAULT_LIMIT: usize = 5_000;
+
+#[derive(Debug, Clone, Default)]
+pub struct Reading {
+    pub events: Vec<ConsentEvent>,
+    /// Why the list may be short: channel unavailable, query rejected, or a
+    /// cursor older than the retained log.
+    pub warning: Option<String>,
+}
+
+/// Read events, newest last.
+pub fn read(options: &ReadOptions) -> Reading {
+    match read_raw(options) {
+        Ok(xml) => {
+            let events = dedup(parse(&xml));
+            let mut warning = None;
+            if !options.cursor_trusted {
+                warning = Some(
+                    "the archive cursor is older than the retained log; some setting changes may be missing"
+                        .to_string(),
+                );
+            }
+            if events.len() >= options.limit {
+                warning = Some(format!(
+                    "read the newest {} events; older ones are in the log but were not requested",
+                    options.limit
+                ));
+            }
+            Reading { events, warning }
+        }
+        Err(error) => Reading {
+            events: Vec::new(),
+            warning: Some(error.to_string()),
+        },
+    }
+}
+
+/// Convenience for callers that want a plain first import.
+pub fn read_events(limit: usize) -> Vec<ConsentEvent> {
+    read(&ReadOptions {
+        limit,
+        ..ReadOptions::default()
+    })
+    .events
+}
+
+/// The XPath filter. `timediff(@SystemTime)` is the documented way to ask for
+/// "events newer than N", and it is applied by the event subsystem rather than
+/// by us, so the cost scales with the answer, not with the log.
+pub fn query_for(options: &ReadOptions) -> Option<String> {
+    let since = options.since_ms?;
+    let now = crate::util::now_ms();
+    let age = (now - since).max(0);
+    Some(format!(
+        "*[System[TimeCreated[timediff(@SystemTime) <= {age}]]]"
+    ))
+}
+
 #[cfg(windows)]
-fn read_raw(limit: usize) -> std::io::Result<String> {
+fn read_raw(options: &ReadOptions) -> std::io::Result<String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut args = vec![
+        "qe".to_string(),
+        CHANNEL.to_string(),
+        format!("/c:{}", options.limit),
+        "/f:xml".to_string(),
+    ];
+    if let Some(query) = query_for(options) {
+        args.push(format!("/q:{query}"));
+    }
     let output = Command::new("wevtutil")
-        .args(["qe", CHANNEL, &format!("/c:{limit}"), "/f:xml"])
+        .args(&args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;
     if !output.status.success() {
@@ -46,7 +129,7 @@ fn read_raw(limit: usize) -> std::io::Result<String> {
 }
 
 #[cfg(not(windows))]
-fn read_raw(_limit: usize) -> std::io::Result<String> {
+fn read_raw(_options: &ReadOptions) -> std::io::Result<String> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "privacy auditing is a Windows event channel",
@@ -55,10 +138,26 @@ fn read_raw(_limit: usize) -> std::io::Result<String> {
 
 /// Whether the channel can be read at all on this machine.
 pub fn available() -> bool {
-    read_raw(1).is_ok()
+    read_raw(&ReadOptions {
+        limit: 1,
+        ..ReadOptions::default()
+    })
+    .is_ok()
 }
 
-fn parse(xml: &str) -> Vec<ConsentEvent> {
+/// Sort by time and drop records the log repeated (a re-imported channel, or a
+/// query that straddled a rotation).
+pub fn dedup(mut events: Vec<ConsentEvent>) -> Vec<ConsentEvent> {
+    events.sort_by_key(|event| event.ts);
+    events.dedup_by(|a, b| a.ts == b.ts && a.capability == b.capability && a.app == b.app);
+    events
+}
+
+/// Parse a captured `wevtutil /f:xml` document.
+///
+/// Public so the fixture in `tests/fixtures/` can be parsed by an integration
+/// test exactly as the binary parses it.
+pub fn parse(xml: &str) -> Vec<ConsentEvent> {
     let mut events = Vec::new();
     for chunk in xml.split("</Event>") {
         let Some(body) = chunk.rfind("<Event ").map(|index| &chunk[index..]) else {
@@ -71,29 +170,7 @@ fn parse(xml: &str) -> Vec<ConsentEvent> {
             continue;
         };
         let event_id = tag_number(body, "<EventID>").unwrap_or(0);
-        let mut fields = Vec::new();
-        let mut rest = body;
-        while let Some(index) = rest.find("<Data Name='") {
-            rest = &rest[index + "<Data Name='".len()..];
-            let Some(end_name) = rest.find('\'') else {
-                break;
-            };
-            let name = &rest[..end_name];
-            let after = &rest[end_name + 1..];
-            if let Some(value) = after.strip_prefix("/>") {
-                fields.push((name.to_string(), String::new()));
-                rest = value;
-                continue;
-            }
-            let Some(value) = after.strip_prefix('>') else {
-                break;
-            };
-            let Some(end_value) = value.find("</Data>") else {
-                break;
-            };
-            fields.push((name.to_string(), unescape(&value[..end_value])));
-            rest = &value[end_value + "</Data>".len()..];
-        }
+        let fields = data_fields(body);
         let get = |name: &str| {
             fields
                 .iter()
@@ -111,6 +188,34 @@ fn parse(xml: &str) -> Vec<ConsentEvent> {
         });
     }
     events
+}
+
+/// Every `<Data Name='…'>value</Data>` in the record, in document order.
+fn data_fields(body: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let mut rest = body;
+    while let Some(index) = rest.find("<Data Name='") {
+        rest = &rest[index + "<Data Name='".len()..];
+        let Some(end_name) = rest.find('\'') else {
+            break;
+        };
+        let name = &rest[..end_name];
+        let after = &rest[end_name + 1..];
+        if let Some(tail) = after.strip_prefix("/>") {
+            fields.push((name.to_string(), String::new()));
+            rest = tail;
+            continue;
+        }
+        let Some(value) = after.strip_prefix('>') else {
+            break;
+        };
+        let Some(end_value) = value.find("</Data>") else {
+            break;
+        };
+        fields.push((name.to_string(), unescape(&value[..end_value])));
+        rest = &value[end_value + "</Data>".len()..];
+    }
+    fields
 }
 
 fn attr(body: &str, needle: &str) -> Option<String> {
@@ -221,5 +326,76 @@ mod tests {
             parse_utc("2026-11-07T19:31:32.3292630123Z"),
             parse_utc("2026-11-07T19:31:32.329263Z")
         );
+    }
+
+    #[test]
+    fn no_cursor_means_no_query_filter() {
+        assert_eq!(query_for(&ReadOptions::default()), None);
+    }
+
+    #[test]
+    fn a_cursor_becomes_a_timediff_filter() {
+        let options = ReadOptions {
+            since_ms: Some(crate::util::now_ms() - 3_600_000),
+            ..ReadOptions::default()
+        };
+        let query = query_for(&options).expect("a cursor must produce a filter");
+        assert!(query.starts_with("*[System[TimeCreated[timediff(@SystemTime) <= "));
+        let age: String = query
+            .chars()
+            .skip_while(|ch| !ch.is_ascii_digit())
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        let age: i64 = age.parse().unwrap();
+        assert!(
+            (3_500_000..=3_700_000).contains(&age),
+            "filter age {age}ms is not about an hour"
+        );
+    }
+
+    #[test]
+    fn a_clamped_cursor_is_rounded_up_not_negative() {
+        let options = ReadOptions {
+            since_ms: Some(crate::util::now_ms() + 60_000),
+            ..ReadOptions::default()
+        };
+        let query = query_for(&options).unwrap();
+        assert!(query.contains("<= 0]]]"), "future cursors clamp to zero");
+    }
+
+    /// Every fragment in the corpus must parse without panicking, and either
+    /// yield a well-formed event or be dropped. Truncated, hostile and
+    /// ill-ordered input is the norm in an event log.
+    #[test]
+    fn survives_a_corpus_of_broken_fragments() {
+        let corpus = [
+            "",
+            "<Event ",
+            "<Event><System>",
+            "<Event><System><TimeCreated SystemTime='not-a-date'/></System></Event>",
+            "<Event><System><TimeCreated SystemTime='2026-11-07T19:31:32Z'/></System><EventData><Data Name='SettingName'>microphone</Data></EventData></Event>",
+            "<Event><System><TimeCreated SystemTime='2026-11-07T19:31:32Z'/><EventID>abc</EventID></System></Event>",
+            "<Event><Data Name='SettingName'/></Event>",
+            "<Event><Data Name='SettingName'>unterminated</Event>",
+            "<Event><Data Name='&bogus;'>x</Data></Event>",
+            "&;&#xEXTRA;<Event></Event>",
+            SAMPLE,
+            SAMPLE,
+        ];
+        for fragment in corpus {
+            let events = parse(fragment);
+            for event in &events {
+                assert!(!event.capability.is_empty());
+                assert!(event.ts > 0);
+            }
+        }
+        // A duplicate record parses twice; deduplication is the reader's job.
+        assert_eq!(parse(SAMPLE).len(), 1);
+    }
+
+    #[test]
+    fn duplicate_records_are_deduplicated_on_read() {
+        let events = dedup(parse(&format!("{SAMPLE}{SAMPLE}")));
+        assert_eq!(events.len(), 1);
     }
 }

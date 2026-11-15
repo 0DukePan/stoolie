@@ -1,9 +1,16 @@
 //! Builds the snapshot every renderer consumes, and prints the terminal summary.
 
+use crate::eventlog;
 use crate::model::{CapabilityState, ConsentEvent, Session};
-use crate::{eventlog, registry, store, util, SENSOR_CAPABILITIES};
+use crate::platform::Host;
+use crate::store;
+use crate::util;
+use crate::SENSOR_CAPABILITIES;
 use anyhow::Result;
 use serde::Serialize;
+
+/// How many ledger rows the summary and the receipt display.
+pub const LEDGER_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineSummary {
@@ -30,6 +37,10 @@ pub struct Snapshot {
     pub archive_path: String,
     pub capabilities_seen: usize,
     pub event_log_available: bool,
+    /// Every sensor-setting change the archive holds, not just this run's delta.
+    pub sensor_event_total: i64,
+    /// Oldest sensor-setting change on record, for the "since <month>" line.
+    pub ledger_first_seen: Option<i64>,
     /// Things the run could not read. Printed, never swallowed.
     pub warnings: Vec<String>,
 }
@@ -39,10 +50,20 @@ impl Snapshot {
         let now = util::now_ms();
         let since = now - (days as i64) * 86_400_000;
 
-        let live = registry::read_sessions();
-        let events_all = eventlog::read_events(400);
+        let host = Host::detect();
+        let live = host.sessions();
 
-        let mut store = store::Store::open_default().ok();
+        let mut store = store::open_default().ok();
+        // Only ask the event log for what the archive does not already hold.
+        let cursor = store
+            .as_ref()
+            .and_then(|store| store.last_event_ts().ok().flatten());
+        let reading = host.read_events(&eventlog::ReadOptions {
+            since_ms: cursor,
+            ..eventlog::ReadOptions::default()
+        });
+        let events_all = reading.events;
+
         let archive_error = match store.as_mut() {
             Some(store) => store.sync(&live, &events_all).err().map(|error| {
                 // A failed import must not fail the run: the live registry is
@@ -52,7 +73,7 @@ impl Snapshot {
             None => Some("archive unavailable: could not open the database".to_string()),
         };
 
-        let timeline = crate::timeline::load();
+        let timeline = host.timeline();
         let mut sessions: Vec<Session> = live;
         if let Some(store) = store.as_ref() {
             if let Ok(archived) = store.sessions_since(since) {
@@ -74,13 +95,28 @@ impl Snapshot {
         }
         sessions.sort_by_key(|session| std::cmp::Reverse(session.start));
 
-        let events: Vec<ConsentEvent> = events_all
-            .iter()
-            .filter(|event| is_sensor(&event.capability))
-            .cloned()
-            .collect();
+        // With a cursor, `events_all` is only the delta. The ledger shown to the
+        // user is everything the archive holds, filtered to sensors.
+        let events: Vec<ConsentEvent> = match store.as_ref() {
+            Some(store) => store.recent_sensor_events(LEDGER_ROWS).unwrap_or_default(),
+            None => {
+                let mut recent: Vec<ConsentEvent> = events_all
+                    .iter()
+                    .filter(|event| is_sensor(&event.capability))
+                    .cloned()
+                    .collect();
+                recent.sort_by_key(|event| std::cmp::Reverse(event.ts));
+                recent.truncate(LEDGER_ROWS);
+                recent
+            }
+        };
+        // The oldest change the archive can name, for "changes since <month>".
+        let ledger_first_seen = store
+            .as_ref()
+            .and_then(|store| store.first_event_ts().ok().flatten())
+            .or_else(|| events.last().map(|event| event.ts));
 
-        let states = registry::read_states();
+        let states = host.states();
         let archive_sessions = store
             .as_ref()
             .map(|s| s.session_count().unwrap_or(0))
@@ -90,11 +126,17 @@ impl Snapshot {
         if let Some(message) = archive_error {
             warnings.push(message);
         }
-        if !event_log_available {
+        if !event_log_available && cursor.is_none() {
             warnings.push("privacy-auditing log returned no events".to_string());
+        }
+        if let Some(warning) = reading.warning.clone() {
+            warnings.push(warning);
         }
         if !timeline.available() {
             warnings.push("activity timeline unavailable on this machine".to_string());
+        }
+        for reason in host.reasons() {
+            warnings.push(reason.clone());
         }
         let archive_events = store
             .as_ref()
@@ -105,7 +147,7 @@ impl Snapshot {
             version: crate::VERSION.to_string(),
             generated: now,
             days,
-            os: os_string(),
+            os: host.os().to_string(),
             sessions,
             states,
             events,
@@ -121,9 +163,14 @@ impl Snapshot {
             archive_events,
             archive_path: store
                 .as_ref()
-                .map(|s| s.path().display().to_string())
+                .map(|store| store.location())
                 .unwrap_or_default(),
-            capabilities_seen: registry::capability_count(),
+            ledger_first_seen,
+            sensor_event_total: store
+                .as_ref()
+                .and_then(|store| store.sensor_event_count().ok())
+                .unwrap_or(events_all.len() as i64),
+            capabilities_seen: host.capability_count(),
             event_log_available,
             warnings,
         })
@@ -224,10 +271,9 @@ impl Snapshot {
             "  {}\n",
             paint.cyan(&format!(
                 "PRIVACY LEDGER  {} changes since {}",
-                self.events.len(),
-                self.events
-                    .first()
-                    .map(|event| util::month(event.ts))
+                self.sensor_event_total.max(self.events.len() as i64),
+                self.ledger_first_seen
+                    .map(util::month)
                     .unwrap_or_else(|| "the log".to_string())
             ))
         ));
@@ -241,7 +287,7 @@ impl Snapshot {
                 })
             ));
         }
-        for event in self.events.iter().rev().take(4) {
+        for event in self.events.iter().take(4) {
             out.push_str(&format!(
                 "    {}  {:<11} {} → {:<10} {} {}\n",
                 util::stamp(event.ts),
@@ -354,30 +400,6 @@ pub fn thousands(value: usize) -> String {
     out
 }
 
-/// OS string for headers: `Windows 10 Pro 22H2 (build 19045)`.
-pub fn os_string() -> String {
-    #[cfg(windows)]
-    {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
-        use winreg::RegKey;
-        if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-        {
-            let name: String = key.get_value("ProductName").unwrap_or_default();
-            let version: String = key.get_value("DisplayVersion").unwrap_or_default();
-            let build: String = key.get_value("CurrentBuild").unwrap_or_default();
-            if !name.is_empty() {
-                return format!("{name} {version} (build {build})");
-            }
-        }
-        "Windows".to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        "non-Windows host".to_string()
-    }
-}
-
 /// Minimal ANSI palette that disappears when colour is off.
 pub struct Palette {
     on: bool,
@@ -458,6 +480,8 @@ mod tests {
             archive_sessions: 0,
             archive_events: 0,
             archive_path: String::new(),
+            sensor_event_total: 1,
+            ledger_first_seen: None,
             capabilities_seen: 0,
             event_log_available: false,
             warnings: Vec::new(),

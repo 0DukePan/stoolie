@@ -12,6 +12,7 @@
 
 pub mod eventlog;
 pub mod model;
+pub mod platform;
 pub mod receipt;
 pub mod registry;
 pub mod report;

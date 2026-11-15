@@ -54,7 +54,7 @@ pub fn render(snapshot: &Snapshot) -> String {
     }
 
     let mut ledger = String::new();
-    for event in snapshot.events.iter().rev().take(5) {
+    for event in snapshot.events.iter().take(5) {
         ledger.push_str(&format!(
             "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td>\
              <td class=\"mono small\">{} → {}</td><td class=\"muted small\">{}</td></tr>",
@@ -131,9 +131,8 @@ pub fn render(snapshot: &Snapshot) -> String {
     let microphone_status = status(snapshot, "microphone");
     let camera_status = status(snapshot, "webcam");
     let ledger_month = snapshot
-        .events
-        .first()
-        .map(|event| month(event.ts))
+        .ledger_first_seen
+        .map(month)
         .unwrap_or_else(|| "the log".to_string());
 
     format!(
@@ -371,6 +370,8 @@ mod tests {
             archive_sessions: 1,
             archive_events: 1,
             archive_path: "C:/x/stoolie.db".into(),
+            sensor_event_total: 1,
+            ledger_first_seen: Some(1_763_000_000_000),
             capabilities_seen: 29,
             event_log_available: true,
             warnings: Vec::new(),

@@ -71,3 +71,16 @@ report.
 - No telemetry, no crash reporting, no update ping in the default path.
 - The archive is readable by anything running as you. That is deliberate: a receipt nobody can audit
   is not a receipt.
+
+## Portability
+
+The crate is a Windows tool by design, but it is not Windows-shaped inside:
+
+- `src/platform.rs` is the only file that knows which OS it is on. Everything above it - the
+  snapshot, the summary, the receipt, the tiers - is host-agnostic, and a non-Windows host returns
+  empty readings with a stated reason rather than a blank that looks like a clean machine.
+- `cargo check --no-default-features` compiles the core with no C toolchain (SQLite is a feature).
+  CI runs the tests both ways, so the seam cannot rot.
+- The receipt, the JSON schema and the archive format are identical on every host; only the sources
+  differ. That is what makes a macOS or Linux reader a `src/platform.rs` change and not a rewrite -
+  and it is also why `stoolie doctor` is the honest answer for any given machine.
